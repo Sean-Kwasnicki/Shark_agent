@@ -8,11 +8,13 @@ os.environ["ENGAGEMENT_WINDOW_HOURS"] = "1"
 os.environ["CB_THRESHOLD"] = "3"
 
 from agent.db import init_db, db
-from agent import ledger, learning2, collector as C
+from agent import ledger, learning2, learning3, collector as C
 from agent.tools import payments
 from agent.http import init as init_http
 
-init_db(); init_http(); payments.init(); learning2.init(); C.init(); learning2.seed(5)
+init_db(); init_http(); payments.init(); learning2.init(); learning3.init(); C.init()
+learning2.seed(5); learning3.seed(5)
+SALES = learning3.active_model_name()   # 'listing_v3' by default, 'listing_v2' on rollback
 
 # 1. Validation rejects garbage, accepts multiple honest shapes
 assert C.validate_engagement({"id": "p1", "upvotes": 3, "comment_count": 2}) == \
@@ -32,8 +34,8 @@ with db() as conn:
     conn.execute("INSERT INTO listings (id, ts, title, description, image_url, price_usd, "
                  "status, moltbook_post_id) VALUES (1,?,?,?,?,?,?,?)",
                  (old, "Test piece", "d", "", 8.0, "live", "post-abc"))
-m = learning2.listing_model()
-m.choose(learning2.listing_candidates(), learning2.featurize_listing, context="1")
+m = learning3.active_model()
+m.choose(learning3.active_candidates(), learning2.featurize_listing, context="1")
 C.record_engagement_decision(1)
 with db() as conn:
     n = conn.execute("SELECT COUNT(*) AS n FROM lints_decisions "
@@ -56,8 +58,8 @@ assert r1["stored"] == 1 and r2["stored"] == 1 and r2["resolved"] == 1, (r1, r2)
 with db() as conn:
     eng = conn.execute("SELECT outcome FROM lints_decisions WHERE model='listing_engagement_v1' "
                        "AND context='1'").fetchone()["outcome"]
-    sales = conn.execute("SELECT outcome FROM lints_decisions WHERE model='listing_v2' "
-                         "AND context='1'").fetchone()["outcome"]
+    sales = conn.execute("SELECT outcome FROM lints_decisions WHERE model=? "
+                         "AND context='1'", (SALES,)).fetchone()["outcome"]
 assert eng == "success", "positive delta must resolve engagement success"
 assert sales == "pending", "sales model must remain UNTOUCHED by engagement data"
 print("T3 engagement resolved into engagement model; sales model untouched")

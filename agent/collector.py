@@ -72,6 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_signals_post ON signals(post_id, ts);
 def init():
     with db() as conn:
         conn.executescript(COLLECTOR_SCHEMA)
+    # collect_once routes intent-bearing feed posts into the opportunity
+    # table, so its schema must exist wherever the collector runs
+    from agent import opportunity
+    opportunity.init()
 
 
 def _now():
@@ -165,6 +169,26 @@ def _breaker_record(ok: bool):
         ledger.record("system", "collector.breaker_open", {"until": until})
 
 
+# ---------- adaptive polling schedule ----------
+# Engagement accrues fastest right after a post goes live, so fresh posts are
+# polled every run and older ones progressively less — same information,
+# fewer requests (rate-limit headroom + less adversarial surface).
+#   age < 6h        -> every run
+#   6h  - 48h       -> every 2nd run
+#   older than 48h  -> every 4th run
+
+def poll_due(listing_ts_iso: str, run_counter: int, now=None) -> bool:
+    try:
+        age_h = ((now or _now()) - datetime.fromisoformat(listing_ts_iso)).total_seconds() / 3600
+    except ValueError:
+        return True   # unparseable timestamp: poll rather than go blind
+    if age_h < 6:
+        return True
+    if age_h < 48:
+        return run_counter % 2 == 0
+    return run_counter % 4 == 0
+
+
 # ---------- core collection ----------
 
 def collect_once(fetch_post=None, fetch_feed=None) -> dict:
@@ -176,12 +200,15 @@ def collect_once(fetch_post=None, fetch_feed=None) -> dict:
         ledger.record("system", "collector.skipped", {"why": "breaker_open"})
         return {"ok": True, "skipped": "breaker_open"}
 
+    run_counter = int(_kv_get("collector_run_counter", "0")) + 1
+    _kv_set("collector_run_counter", str(run_counter))
     stored, flagged, failures = 0, 0, 0
-    # 1) engagement on our own live listings' posts
+    # 1) engagement on our own live listings' posts (adaptive schedule)
     with db() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT id, moltbook_post_id FROM listings "
+            "SELECT id, ts, moltbook_post_id FROM listings "
             "WHERE status='live' AND moltbook_post_id != ''")]
+    rows = [r for r in rows if poll_due(r["ts"], run_counter)]
     for row in rows:
         raw = fetch_post(row["moltbook_post_id"])
         if raw is None:
@@ -213,6 +240,11 @@ def collect_once(fetch_post=None, fetch_feed=None) -> dict:
         intelligence.prune()
     except Exception as e:
         ledger.record("system", "collector.intel_error", {"err": str(e)})
+    try:
+        from agent import opportunity
+        opportunity.ingest_from_feed(feed)
+    except Exception as e:
+        ledger.record("system", "collector.opportunity_error", {"err": str(e)})
     if isinstance(feed, list) and feed:
         titles = [sanitize_text(p.get("title", "")) for p in feed[:10]
                   if isinstance(p, dict) and sanitize_text(p.get("title", ""))]
@@ -269,10 +301,12 @@ def engagement_model() -> learning2.LinTS:
 def record_engagement_decision(listing_id: int):
     """Called at publish time so the engagement model has a pending decision
     (same features as the published action) to credit later."""
+    from agent import learning3
     with db() as conn:
         row = conn.execute(
-            "SELECT x_json, action_json FROM lints_decisions WHERE model='listing_v2' "
-            "AND context=? ORDER BY id DESC LIMIT 1", (str(listing_id),)).fetchone()
+            "SELECT x_json, action_json FROM lints_decisions WHERE model=? "
+            "AND context=? ORDER BY id DESC LIMIT 1",
+            (learning3.active_model_name(), str(listing_id))).fetchone()
     if not row:
         return
     with db() as conn:

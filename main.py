@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 
 from agent.db import init_db
-from agent import config, ledger, memory, spending, planner, commerce, learning, learning2, economics, collector, intelligence
+from agent import config, ledger, memory, spending, planner, commerce, learning, learning2, learning3, economics, collector, intelligence, opportunity
 from agent.http import init as init_http
 from agent.tools import payments
 
@@ -57,9 +57,11 @@ async def lifespan(app: FastAPI):
     payments.init()
     learning.init()
     learning2.init()
+    learning3.init()
     economics.init()
     collector.init()
     intelligence.init()
+    opportunity.init()
     ledger.record("system", "boot", {"agent": config.AGENT_NAME})
     task = asyncio.create_task(_scheduler())
     ctask = asyncio.create_task(_collector_loop())
@@ -69,6 +71,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=f"{config.AGENT_NAME} agent", lifespan=lifespan)
+
+
+@app.get("/")
+def root():
+    """Public landing route so the deployed URL doesn't 404 in a browser."""
+    return {"service": f"{config.AGENT_NAME} agent", "status": "running",
+            "health": "/health", "docs": "/docs",
+            "note": "All control endpoints require Authorization: Bearer <OWNER_TOKEN>."}
 
 
 @app.get("/health")
@@ -166,10 +176,36 @@ def market(authorization: str | None = Header(None)):
     return intelligence.analyze_market()
 
 
+class SignalIn(BaseModel):
+    source: str
+    subject: str
+    text: str = ""
+    tags: str = ""
+    source_trust: str = "compliant"
+    competitors: int = 0
+    est_value_usd: float = 0.0
+    ts: str | None = None
+
+
+@app.post("/opportunities")
+def add_opportunity(s: SignalIn, authorization: str | None = Header(None)):
+    _auth(authorization)
+    return opportunity.ingest(s.model_dump(exclude_none=True))
+
+
+@app.get("/opportunities")
+def list_opportunities(limit: int = 10, min_score: float = 0.0,
+                       authorization: str | None = Header(None)):
+    _auth(authorization)
+    return {"opportunities": opportunity.rank(limit, min_score)}
+
+
 @app.get("/learning")
 def learning_report(authorization: str | None = Header(None)):
     _auth(authorization)
-    return {"beliefs_v2_listing": learning2.report(), "beliefs_v1_arms": learning.report()}
+    return {"active_sales_learner": learning3.SALES_LEARNER,
+            "beliefs_active_listing": learning3.active_report(),
+            "beliefs_v1_arms": learning.report()}
 
 
 @app.get("/economics")
@@ -187,6 +223,26 @@ def revenue(authorization: str | None = Header(None)):
     return {"total_revenue_usd": payments.total_revenue(),
             "total_spend_usd": ledger.total_spend(),
             "net_usd": payments.total_revenue() - ledger.total_spend()}
+
+
+class RegisterIn(BaseModel):
+    name: str
+    description: str
+
+
+@app.post("/moltbook/register")
+def moltbook_register(r: RegisterIn, authorization: str | None = Header(None)):
+    """One-time Moltbook registration. Returns api_key + claim_url; a HUMAN
+    must then complete the claim_url (X/Twitter verification) before the key
+    works. Save the returned api_key into MOLTBOOK_API_KEY and redeploy.
+    NOTE: this calls the live Moltbook API and is not exercised by the offline
+    test suite — verify the response shape against moltbook.com/skill.md."""
+    _auth(authorization)
+    from agent.tools import moltbook
+    try:
+        return moltbook.register(r.name, r.description)
+    except moltbook.MoltbookError as e:
+        raise HTTPException(502, f"Moltbook registration failed: {e}")
 
 
 @app.post("/webhooks/stripe")

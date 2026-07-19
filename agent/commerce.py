@@ -14,7 +14,7 @@ import os
 import json
 from datetime import datetime, timezone, timedelta
 from agent.db import db
-from agent import ledger, llm, learning2, intelligence
+from agent import ledger, llm, learning2, learning3, intelligence
 from agent.tools import payments, moltbook, nft, notify
 
 AUTO_PUBLISH = os.getenv("AUTO_PUBLISH", "false").lower() == "true"
@@ -65,12 +65,23 @@ def propose_listing(theme: str = "") -> dict:
         listing_id = cur.lastrowid
     if topic:
         intelligence.bind_topic_to_listing(listing_id)
-    action = learning2.listing_model().choose(
-        learning2.listing_candidates(), learning2.featurize_listing, context=str(listing_id))
+    action = learning3.active_model().choose(
+        learning3.active_candidates(), learning2.featurize_listing, context=str(listing_id))
     price, style = float(action["price"]), str(action["style"])
-    raw = llm.work(WORKER_SYSTEM.replace("{style_hint}", STYLE_HINTS[style]),
-                   f"Theme/context: {theme}")
-    d = llm.extract_json(raw)
+    try:
+        raw = llm.work(WORKER_SYSTEM.replace("{style_hint}", STYLE_HINTS[style]),
+                       f"Theme/context: {theme}")
+        d = llm.extract_json(raw)
+        if not str(d.get("title", "")).strip():
+            raise ValueError("worker returned no title")
+    except Exception as e:
+        # The draft never materialized. Delete the orphan row so it can't linger
+        # as '(drafting)' forever — or, under AUTO_PUBLISH, get published empty.
+        with db() as conn:
+            conn.execute("DELETE FROM listings WHERE id=?", (listing_id,))
+        ledger.record("system", "commerce.propose_failed",
+                      {"listing_id": listing_id, "err": str(e)})
+        raise ValueError(f"Listing draft #{listing_id} failed and was rolled back: {e}")
     with db() as conn:
         conn.execute("UPDATE listings SET title=?, description=?, price_usd=? WHERE id=?",
                      (str(d["title"])[:120], str(d["description"])[:1000], price, listing_id))
@@ -98,7 +109,7 @@ def expire_stale_listings() -> int:
             "(SELECT 1 FROM orders o WHERE o.listing_id=l.id)", (cutoff,))]
     for row in stale:
         lid = str(row["id"])
-        learning2.listing_model().resolve(lid, success=False)
+        learning3.active_model().resolve(lid, success=False)
         intelligence.credit_topic(row["id"], success=False)
         with db() as conn:
             conn.execute("UPDATE listings SET status='closed' WHERE id=?", (row["id"],))
@@ -114,6 +125,20 @@ def approve_listing(listing_id: int) -> dict:
     return {"listing_id": listing_id, "status": "approved"}
 
 
+def _drafted_post_text(listing_id: int) -> str:
+    """Recover the style-directed sales copy the worker drafted at propose time
+    (stored in the publish task's notes). Empty string if unavailable."""
+    with db() as conn:
+        row = conn.execute("SELECT notes FROM tasks WHERE title=? ORDER BY id DESC LIMIT 1",
+                           (f"Publish listing #{listing_id}",)).fetchone()
+    if not row:
+        return ""
+    try:
+        return str(json.loads(row["notes"]).get("moltbook_post", "")).strip()
+    except (json.JSONDecodeError, AttributeError):
+        return ""
+
+
 def publish_listing(listing_id: int, moltbook_post_text: str = "") -> dict:
     with db() as conn:
         row = conn.execute("SELECT * FROM listings WHERE id=?", (listing_id,)).fetchone()
@@ -123,8 +148,9 @@ def publish_listing(listing_id: int, moltbook_post_text: str = "") -> dict:
     if live >= MAX_LIVE_LISTINGS:
         raise ValueError(f"Max live listings ({MAX_LIVE_LISTINGS}) reached.")
     link = payments.create_payment_link(listing_id, row["title"], row["price_usd"])
-    body = moltbook_post_text or (
-        f"{row['description']}\n\nPrice: ${row['price_usd']:.2f} — {link}\n"
+    copy = moltbook_post_text or _drafted_post_text(listing_id) or row["description"]
+    body = (
+        f"{copy}\n\nPrice: ${row['price_usd']:.2f} — {link}\n"
         f"(Listed autonomously by an AI agent; owner-audited hash-chained ledger.)"
     )
     post_id = ""
@@ -136,6 +162,8 @@ def publish_listing(listing_id: int, moltbook_post_text: str = "") -> dict:
     with db() as conn:
         conn.execute("UPDATE listings SET status='live', payment_link=?, moltbook_post_id=? "
                      "WHERE id=?", (link, post_id, listing_id))
+        conn.execute("UPDATE tasks SET status='done' WHERE title=? AND status='open'",
+                     (f"Publish listing #{listing_id}",))
     if post_id:
         from agent import collector
         collector.record_engagement_decision(listing_id)
@@ -158,7 +186,7 @@ def fulfill_order(listing_id: int, stripe_ref: str, amount_usd: float, recipient
         minted = nft.mint_to(recipient, row["title"], row["description"], row["image_url"])
         nft_id = str(minted.get("id", minted.get("actionId", "")))
         _mark_order(order_id, "minted", nft_id)
-        learning2.listing_model().resolve(str(listing_id), success=True)
+        learning3.active_model().resolve(str(listing_id), success=True)
         intelligence.credit_topic(listing_id, success=True)
         notify.owner(f"SALE: '{row['title']}' ${amount_usd:.2f} — minted {nft_id} to {recipient}. "
                      f"Total revenue: ${payments.total_revenue():.2f}")

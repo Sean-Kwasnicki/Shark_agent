@@ -147,12 +147,47 @@ def analyze_market() -> dict:
     rows.sort(key=lambda r: -r["score"])
     k = max(1, len(rows) // 10)
     result = {"opportunities": rows[:10], "avoid": rows[-k:] if len(rows) > 1 else [],
-              "posts_analyzed": len(posts)}
+              "trending": trending()[:8], "posts_analyzed": len(posts)}
     if rows:
         ledger.record("system", "intel.analyze",
                       {"patterns": len(rows), "top": rows[0]["keyword"],
                        "posts": len(posts)})
     return result
+
+
+TREND_HALF_LIFE_DAYS = float(os.getenv("TREND_HALF_LIFE_DAYS", "3.0"))
+
+
+def trending(half_life_days: float | None = None, now=None) -> list[dict]:
+    """Keyword momentum, not just totals. For every observed post we know the
+    engagement GROWTH while we watched it (last snapshot minus first). Each
+    post's growth is decayed by the age of its last sighting with a half-life
+    (default 3 days), so a keyword gaining traction NOW outranks one that was
+    big last month — static totals can't tell those apart. Deterministic math.
+    """
+    hl = half_life_days or TREND_HALF_LIFE_DAYS
+    ref = now or _now()
+    with db() as conn:
+        posts = [dict(r) for r in conn.execute("SELECT * FROM observed_posts")]
+    stats: dict[str, dict] = {}
+    for p in posts:
+        growth = (max(0, p["upvotes"] - p["first_upvotes"])
+                  + 2 * max(0, p["comments"] - p["first_comments"]))
+        if growth == 0:
+            continue
+        try:
+            age_days = (ref - datetime.fromisoformat(p["last_seen"])).total_seconds() / 86400
+        except ValueError:
+            continue
+        w = 0.5 ** (max(0.0, age_days) / hl)
+        for kw in set(keywords(p["title"])):
+            s = stats.setdefault(kw, {"momentum": 0.0, "n": 0})
+            s["momentum"] += growth * w
+            s["n"] += 1
+    rows = [{"keyword": kw, "momentum": round(s["momentum"], 2), "posts": s["n"]}
+            for kw, s in stats.items() if s["n"] >= 2]
+    rows.sort(key=lambda r: -r["momentum"])
+    return rows
 
 
 # ---------- 4. HYPOTHESIZE (worker LLM, injectable for tests) ----------
@@ -175,7 +210,8 @@ def generate_hypotheses(llm_fn=None) -> list[dict]:
         from agent import llm
         llm_fn = lambda sys, usr: llm.work(sys, usr)
     prompt = json.dumps({"opportunities": analysis["opportunities"][:5],
-                         "avoid": analysis["avoid"][:5]})
+                         "avoid": analysis["avoid"][:5],
+                         "rising_now": analysis.get("trending", [])[:5]})
     from agent.llm import extract_json
     try:
         out = extract_json(llm_fn(HYP_SYSTEM, prompt))

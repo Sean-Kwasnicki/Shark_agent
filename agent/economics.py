@@ -202,8 +202,8 @@ def daily_digest_if_due() -> str | None:
     _kv_set("digest_last_day", today)
     day, week, alltime = pnl(1), pnl(7), pnl(None)
     try:
-        from agent import learning2
-        top = learning2.report()[:3]
+        from agent import learning3
+        top = learning3.active_report()[:3]
         learned = ", ".join(f"${t['price']:.0f}x{t['style']} EV ${t['expected_revenue']:.2f}"
                             for t in top)
     except Exception:

@@ -43,16 +43,27 @@ allowlist, forbidden domains). The FastAPI/LLM/network layers compile but
 were not runtime-tested in the build environment (no network access) —
 smoke-test them on first deploy with `POST /cycle`.
 
-## Deploy (Railway, your usual flow)
+## Deploy
 
-1. Push this repo to GitHub, connect to Railway.
-2. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-3. Set env vars from `.env.example`. **OWNER_TOKEN is mandatory** — every
-   route requires `Authorization: Bearer <token>`.
-4. Add a Railway volume mounted where `DB_PATH` points, or SQLite resets
-   on redeploy.
-5. Trigger a manual cycle: `curl -X POST -H "Authorization: Bearer $TOKEN" https://<app>/cycle`
-6. Check the receipts: `GET /ledger` (includes live chain verification).
+### Render (recommended — `render.yaml` blueprint is included)
+
+1. Push this repo to GitHub → Render Dashboard → New → Blueprint → pick the repo.
+2. The blueprint provisions a **paid `starter` web service with a 1 GB persistent
+   disk** at `/data`, sets `DB_PATH=/data/agent.db`, and auto-generates
+   `OWNER_TOKEN`. **Do not use the free tier**: it has no disk (SQLite is wiped on
+   restart) and spins down after 15 min idle (killing the 24/7 loops).
+3. On first create, Render prompts for the `sync: false` secrets (Anthropic key,
+   Discord webhook, Stripe/Crossmint/Moltbook keys, etc.). Paste what you have;
+   the rest can be added later in the Dashboard.
+4. Read `OWNER_TOKEN` from the service's Environment tab (Render generated it).
+5. Smoke test: `curl -X POST -H "Authorization: Bearer $TOKEN" https://<app>/cycle`
+   then `GET /ledger` (includes live chain verification).
+
+### Railway (alternative)
+
+1. Push to GitHub, connect to Railway. Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+2. Set env vars from `.env.example`. **OWNER_TOKEN is mandatory.**
+3. Add a Railway volume mounted where `DB_PATH` points, or SQLite resets on redeploy.
 
 ## Safety model (read before wiring real money)
 
@@ -78,9 +89,12 @@ smoke-test them on first deploy with `POST /cycle`.
 5. `GET /revenue` shows revenue vs. spend vs. net, all backed by the ledger
 
 Go-live order: Stripe TEST keys + Crossmint STAGING end-to-end first,
-then production keys. One manual step is unavoidable: Moltbook
-registration returns a claim URL your human account must verify via an
-X post before the API key works.
+then production keys. Run `python test_live_smoke.py` with those keys set —
+it exercises the real payment-link, webhook-secret, mint, and feed paths,
+refuses live Stripe keys and production Crossmint by design, and reports
+SKIP for any credential not yet provided. One manual step is unavoidable:
+Moltbook registration returns a claim URL your human account must verify
+via an X post before the API key works.
 
 ## How the agent learns (v2 — contextual LinTS)
 
@@ -182,6 +196,22 @@ An adversarial code review found four real defects, all fixed with tests:
 
 Also added: GET /ledger/export (publishable proof-of-history),
 railway.json health-checked deploy config, run_tests.sh, GitHub Actions CI.
+
+## v1.8 — logistic learner + smarter data feed
+
+- Sales learner upgraded to Bayesian LOGISTIC Thompson Sampling
+  (`agent/learning3.py`, Laplace approximation, Newton-Raphson MAP,
+  exact per-observation discounting). Benchmarked against v2 LinTS
+  (harness: `test_learning3.py`): +27% revenue when true conversion rates
+  span a wide range (0.5%–65%), statistical tie in v2's narrow design
+  regime and in the sparse regime — never measurably worse. Optimizes NET
+  revenue (price minus card fees), not gross. `SALES_LEARNER=v2` rolls
+  back instantly; both learners share the decision/audit tables.
+- Collector now polls adaptively (fresh posts every run, 6–48h every 2nd
+  run, older every 4th) — same signal, fewer requests.
+- Intelligence adds `trending()`: engagement-GROWTH momentum with a 3-day
+  half-life, so what is rising NOW outranks what was big last month;
+  wired into `analyze_market()` and the hypothesis prompt (`test_feed.py`).
 
 ## Roadmap to full "Bartok" capability
 

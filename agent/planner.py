@@ -12,7 +12,7 @@ validates and dispatches them. Unknown tools, over-budget actions, and
 malformed JSON are ledgered and skipped — never guessed at.
 """
 import json
-from agent import config, constraints, ledger, memory, spending, llm, commerce, learning, learning2, economics, collector, intelligence
+from agent import config, constraints, ledger, memory, spending, llm, commerce, learning, learning2, learning3, economics, collector, intelligence, opportunity
 from agent.db import db
 from agent.tools import research, notify, moltbook
 
@@ -36,6 +36,7 @@ Available tools and args:
 - commerce.propose_listing: {{"theme": str}}  (empty theme = use learned market hypothesis)
 - intel.analyze: {{}}  (deterministic market pattern report; free)
 - intel.hypothesize: {{}}  (turn top market gaps into 3 new product ideas)
+- opportunity.rank: {{"limit": int}}  (deterministic ranked revenue opportunities; free)
 - commerce.publish_listing: {{"listing_id": int}}  (only works on approved listings)
 
 Rules: max {max_actions} actions. You cannot spend money directly — purchase.request
@@ -76,6 +77,9 @@ def _dispatch(action: dict) -> dict:
         return {"hypotheses": intelligence.generate_hypotheses()}
     if tool == "commerce.publish_listing":
         return commerce.publish_listing(int(args.get("listing_id", 0)))
+    if tool == "opportunity.rank":
+        return {"ranked": opportunity.rank(int(args.get("limit", 5)),
+                                           float(args.get("min_score", 0)))}
     raise constraints.ConstraintViolation(f"No dispatcher for tool '{tool}'.")
 
 
@@ -99,7 +103,7 @@ def run_cycle() -> dict:
         ledger.record("system", "cycle.skipped", {"why": "IDLE", "reason": "state unchanged"})
         return {"ok": True, "skipped": "IDLE"}
     learning.decay(gamma=0.995)                 # v1 arms (still usable for other experiments)
-    learning2.listing_model().discount(0.995)   # v2 contextual model stays adaptive
+    learning3.active_model().discount(0.995)    # active sales model stays adaptive
     expired = commerce.expire_stale_listings()  # failures teach the bandit too
     commerce.recover_stuck_orders()             # crash-consistency for paid orders
     with db() as conn:
@@ -109,7 +113,7 @@ def run_cycle() -> dict:
         "memories": memory.context_block(config.MISSION),
         "open_tasks": open_tasks,
         "pending_spend_approvals": spending.pending(),
-        "learned_beliefs": learning2.report()[:6],
+        "learned_beliefs": learning3.active_report()[:6],
         "listings_expired_this_cycle": expired,
         "recent_ledger": [
             {"action": r["action"], "ts": r["ts"]} for r in ledger.recent(15)
@@ -127,13 +131,18 @@ def run_cycle() -> dict:
         ledger.record("system", "cycle.error", {"stage": "plan", "err": str(e)})
         return {"ok": False, "error": str(e)}
 
-    results, actions_taken = [], 0
+    LLM_TOOLS = {"commerce.propose_listing", "intel.hypothesize"}  # dispatches that spend a worker call
+    results, actions_taken, llm_calls = [], 0, 1  # 1 = the planner call above
     for action in plan.get("actions", [])[: config.HARD_RULES["max_actions_per_cycle"]]:
+        is_llm = action.get("tool") in LLM_TOOLS
         try:
-            constraints.check_cycle_budget(actions_taken, llm_calls=1)
+            # free tools only face the action cap; LLM tools also face the call cap
+            constraints.check_cycle_budget(actions_taken, llm_calls if is_llm else 0)
             out = _dispatch(action)
             results.append({"action": action, "ok": True, "out": str(out)[:300]})
             actions_taken += 1
+            if is_llm:
+                llm_calls += 1
         except constraints.ConstraintViolation as e:
             ledger.record("system", "constraint.block", {"action": action, "reason": str(e)})
             results.append({"action": action, "ok": False, "blocked": str(e)})

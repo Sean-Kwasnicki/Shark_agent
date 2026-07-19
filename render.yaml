@@ -1,0 +1,84 @@
+# Render Blueprint — one-click deploy that FIXES the two deployment defects
+# found earlier: (1) ephemeral SQLite wiped on restart, (2) free-tier spin-down
+# that kills the 24/7 loops. Both require a PAID instance with a persistent disk.
+#
+# Schema verified against https://render.com/docs/blueprint-spec (July 2026):
+#   - disk.sizeGB must be 1 or a multiple of 5 (1 GB is plenty for SQLite here)
+#   - generateValue: Render creates a base64 256-bit secret at provision time
+#   - sync: false: Render prompts for the value in the Dashboard on first create
+#
+# Deploy: push repo to GitHub -> Render Dashboard -> New -> Blueprint -> pick repo.
+# Validate locally first (optional): `render blueprints validate render.yaml`.
+services:
+  - type: web
+    name: shark-agent
+    runtime: python
+    plan: starter            # PAID. Free tier has no disk and spins down — do not use.
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # --- persistence (the whole point of the paid disk) ---
+      - key: DB_PATH
+        value: /data/agent.db
+      - key: PYTHON_VERSION
+        value: "3.12"
+
+      # --- generated secret: every API route requires this bearer token ---
+      - key: OWNER_TOKEN
+        generateValue: true
+
+      # --- secrets YOU paste in the Render Dashboard on first deploy ---
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OWNER_DISCORD_WEBHOOK      # how the agent asks you to approve things
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      - key: BRAVE_API_KEY              # web search (optional)
+        sync: false
+      - key: RESEND_API_KEY             # email notifications (optional)
+        sync: false
+      - key: RESEND_FROM                # verified sender, e.g. agent@yourdomain.com
+        sync: false
+      - key: MOLTBOOK_API_KEY           # after register + human X-verification
+        sync: false
+      - key: CROSSMINT_API_KEY          # NFT minting (start on staging)
+        sync: false
+      - key: CROSSMINT_COLLECTION_ID
+        sync: false
+      - key: LISTING_IMAGE_URL          # art you own the rights to
+        sync: false
+      - key: STRIPE_SECRET_KEY          # start with a TEST key
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+
+      # --- safety-relevant config, set explicitly (not left to code defaults) ---
+      - key: CROSSMINT_ENV
+        value: staging                  # free testnet; switch to www deliberately
+      - key: AUTO_PUBLISH
+        value: "false"                  # keep the human approval gate on
+      - key: MAX_SINGLE_SPEND_AUTO_USD
+        value: "0"                      # every spend needs your approval
+      - key: MAX_DAILY_SPEND_USD
+        value: "25"
+      - key: MAX_TOTAL_SPEND_USD
+        value: "100"
+      - key: DAILY_COST_BUDGET_USD
+        value: "1.00"                   # hard operating-cost stop per day
+
+      # --- model + learning config (safe to keep as-is) ---
+      - key: MODEL_PLANNER
+        value: claude-sonnet-4-6
+      - key: MODEL_WORKER
+        value: claude-haiku-4-5-20251001
+      - key: SALES_LEARNER
+        value: v3

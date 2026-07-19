@@ -38,6 +38,7 @@ HARD_RULES = {
         "commerce.publish_listing",   # only succeeds on owner-approved listings
         "intel.analyze",              # deterministic, free
         "intel.hypothesize",          # worker LLM, governed by cycle budget
+        "opportunity.rank",           # deterministic revenue-opportunity ranking; free
     ],
     "forbidden_domains": ["bank", "coinbase", "binance", "robinhood"],  # substring match on URLs
     # Cadence
