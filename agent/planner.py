@@ -37,6 +37,8 @@ Available tools and args:
 - intel.analyze: {{}}  (deterministic market pattern report; free)
 - intel.hypothesize: {{}}  (turn top market gaps into 3 new product ideas)
 - opportunity.rank: {{"limit": int}}  (deterministic ranked revenue opportunities; free)
+- outreach.draft: {{"recipient": "email", "subject": str, "body": str, "opportunity_id": int}}
+  (drafts a compliant email for owner review — NOTHING sends without the owner's explicit approval)
 - commerce.publish_listing: {{"listing_id": int}}  (only works on approved listings)
 
 Rules: max {max_actions} actions. You cannot spend money directly — purchase.request
@@ -80,6 +82,12 @@ def _dispatch(action: dict) -> dict:
     if tool == "opportunity.rank":
         return {"ranked": opportunity.rank(int(args.get("limit", 5)),
                                            float(args.get("min_score", 0)))}
+    if tool == "outreach.draft":
+        from agent import outreach
+        return outreach.draft(str(args.get("recipient", "")),
+                              str(args.get("subject", "")),
+                              str(args.get("body", "")),
+                              int(args.get("opportunity_id", 0) or 0))
     raise constraints.ConstraintViolation(f"No dispatcher for tool '{tool}'.")
 
 

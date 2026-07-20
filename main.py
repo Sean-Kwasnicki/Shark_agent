@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 
 from agent.db import init_db
-from agent import config, ledger, memory, spending, planner, commerce, learning, learning2, learning3, economics, collector, intelligence, opportunity
+from agent import config, ledger, memory, spending, planner, commerce, learning, learning2, learning3, economics, collector, intelligence, opportunity, outreach
 from agent.http import init as init_http
 from agent.tools import payments
 
@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI):
     collector.init()
     intelligence.init()
     opportunity.init()
+    outreach.init()
     ledger.record("system", "boot", {"agent": config.AGENT_NAME})
     task = asyncio.create_task(_scheduler())
     ctask = asyncio.create_task(_collector_loop())
@@ -198,6 +199,63 @@ def list_opportunities(limit: int = 10, min_score: float = 0.0,
                        authorization: str | None = Header(None)):
     _auth(authorization)
     return {"opportunities": opportunity.rank(limit, min_score)}
+
+
+# ---------- Compliant outreach (draft → owner approve → send) ----------
+
+class OutreachDraftIn(BaseModel):
+    recipient: str
+    subject: str
+    body: str
+    opportunity_id: int = 0
+
+
+@app.get("/outreach")
+def outreach_queue(limit: int = 20, authorization: str | None = Header(None)):
+    _auth(authorization)
+    return {"outreach": outreach.queue(limit)}
+
+
+@app.post("/outreach/draft")
+def outreach_draft(d: OutreachDraftIn, authorization: str | None = Header(None)):
+    _auth(authorization)
+    try:
+        return outreach.draft(d.recipient, d.subject, d.body, d.opportunity_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/outreach/{oid}/decide")
+def outreach_decide(oid: int, d: Decision, authorization: str | None = Header(None)):
+    _auth(authorization)
+    try:
+        return outreach.decide(oid, d.approve)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/outreach/{oid}/send")
+def outreach_send(oid: int, authorization: str | None = Header(None)):
+    """Owner-triggered send. Still passes evaluate_send() guardrails."""
+    _auth(authorization)
+    try:
+        return outreach.send(oid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class SuppressIn(BaseModel):
+    email: str
+    reason: str = "unsubscribe"
+
+
+@app.post("/outreach/suppress")
+def outreach_suppress(s: SuppressIn, authorization: str | None = Header(None)):
+    _auth(authorization)
+    try:
+        return outreach.suppress(s.email, s.reason)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/learning")

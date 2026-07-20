@@ -39,6 +39,7 @@ HARD_RULES = {
         "intel.analyze",              # deterministic, free
         "intel.hypothesize",          # worker LLM, governed by cycle budget
         "opportunity.rank",           # deterministic revenue-opportunity ranking; free
+        "outreach.draft",             # draft ONLY; sending requires explicit owner approval + guardrails
     ],
     "forbidden_domains": ["bank", "coinbase", "binance", "robinhood"],  # substring match on URLs
     # Cadence
